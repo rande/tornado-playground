@@ -7,7 +7,7 @@ import tornado.httpclient
 
 from futures import ThreadPoolExecutor
 
-import time
+import time, datetime
 
 class HomeHandler(tornado.web.RequestHandler):
     def get(self):
@@ -15,12 +15,14 @@ class HomeHandler(tornado.web.RequestHandler):
         self.write("End request!")
 
 class Step1Handler(tornado.web.RequestHandler):
+    def heavy_blocking_method(self):
+        time.sleep(5)
+
     def get(self):
         """
         This code will block because time.sleep is blocking the process
         """
-
-        time.sleep(5)
+        self.heavy_blocking_method()
 
         self.write("You wait 5 seconds and you lock the ioloop<br/>")
         self.write("Try to start two simultaneous connections, the second one will last for 10s. <br />")
@@ -29,13 +31,17 @@ class Step1Handler(tornado.web.RequestHandler):
         self.write("End request!")
 
 class Step2Handler(tornado.web.RequestHandler):
+
+    def heavy_blocking_method(self):
+        time.sleep(5)
+
     @tornado.web.asynchronous
     def get(self):
         """
         This code will still block the ioloop because time.sleep is blocking event with the
         @tornado.web.asynchronous annotation.
         """
-        time.sleep(5)
+        self.heavy_blocking_method()
 
         self.write("You wait 5 seconds and you lock the ioloop<br/>")
         self.write("Try to start two simultaneous connections, the second one will last for 10s. <br />")
@@ -58,7 +64,7 @@ class Step3Handler(tornado.web.RequestHandler):
         self.executor = executor
 
     @tornado.concurrent.run_on_executor
-    def sleep(self):
+    def heavy_blocking_method(self):
         print "I will sleep 5s in foreground ..."
 
         time.sleep(5)
@@ -75,7 +81,7 @@ class Step3Handler(tornado.web.RequestHandler):
         The ThreadPoolExecutor also manage up to 10 simultaneous thread, others will wait if the
         number of simultaneous connections > 10
         """
-        self.sleep()
+        self.heavy_blocking_method()
 
         self.write("You havn't wait 5 seconds and you don't block the ioloop<br/>")
         self.write("But you create multiple threads handled by the executor ... <br />")
@@ -103,7 +109,7 @@ class Step4Handler(tornado.web.RequestHandler):
         self.io_loop = io_loop
 
     @tornado.concurrent.run_on_executor
-    def sleep(self):
+    def heavy_blocking_method(self):
         """
         The @run_on_executor annotation always return a future object, so once the function terminate
         the future will contains the "hello" string as a result
@@ -124,7 +130,7 @@ class Step4Handler(tornado.web.RequestHandler):
         This code will not block the event loop, because the @run_on_executor annotation puts the
         sleep method inside a thread, however the method call now provide a callback method.
         """
-        self.sleep(callback=self.complete)
+        self.heavy_blocking_method(callback=self.complete)
 
         self.write("You wait 5 seconds and you don't block the ioloop<br/>")
         self.write("Try to start two simultaneous connections, the second one will last for 5s. too ...  <br />")
@@ -140,8 +146,7 @@ class Step4Handler(tornado.web.RequestHandler):
         self.finish()
 
 class Step5Handler(tornado.web.RequestHandler):
-    @tornado.web.asynchronous
-    def get(self):
+    def heavy_blocking_method(self):
         """
         The tornado.process.Subprocess class is async so the call will not block. The callback
         will close the connection when the response will be known.
@@ -150,6 +155,10 @@ class Step5Handler(tornado.web.RequestHandler):
         p = tornado.process.Subprocess(["sleep", "5"])
         p.set_exit_callback(self.complete)
         print "Write output"
+
+    @tornado.web.asynchronous
+    def get(self):
+        self.heavy_blocking_method()
 
         self.write("You wait 5 seconds and you don't block the ioloop<br/>")
         self.write("Try to start two simultaneous connections, the second one will last for 5s. too ...  <br />")
@@ -163,20 +172,30 @@ class Step5Handler(tornado.web.RequestHandler):
 
         self.finish()
 
+
 class Step6Handler(tornado.web.RequestHandler):
+    def initialize(self, io_loop=None):
+        self.io_loop = io_loop
+
+    @tornado.gen.coroutine
+    def heavy_blocking_method(self):
+        print "start yielding"
+
+        task = yield tornado.gen.Task(self.io_loop.add_timeout, datetime.timedelta(seconds=5))
+
+        print "Task", task
+
     @tornado.web.asynchronous
     def get(self):
-        http_client = tornado.httpclient.AsyncHTTPClient()
 
-        # fetch will return a Future
-        f = http_client.fetch("http://google.com", callback=self.on_fetch)
+        future = self.heavy_blocking_method(callback=self.complete)
 
-        print f
+        print future
 
-        return f
+        return future
 
-    def on_fetch(self, response):
-        self.write("Let's try to not lock the ioloop: <a href='/step7'>Step 7</a><br />")
+    def complete(self, result):
+        self.write("Let's try to not block the ioloop: <a href='/step9'>Step 9</a><br />")
 
         self.write("End request!")
 
@@ -185,40 +204,42 @@ class Step6Handler(tornado.web.RequestHandler):
         self.finish()
 
 class Step7Handler(tornado.web.RequestHandler):
+    """
+    This code will block the IO loop, because the coroutine annotation only works with
+    async lib, like the HTTPClient (see 02-async-process.py)
+    """
+    def initialize(self, io_loop=None, executor=None):
+        self.io_loop = io_loop
+        self.executor = executor
+
+    def heavy_blocking_method(self, callback):
+        print "start sleep"
+
+        print "callback", callback
+
+        time.sleep(5)
+
+        print "End sleep"
+
+        callback("hello world!!")
+
     @tornado.gen.coroutine
     def get(self):
-        http_client = tornado.httpclient.AsyncHTTPClient()
 
-        response = yield http_client.fetch("http://google.com")
+        print "Start request"
 
-        print response
+        result = yield tornado.gen.Task(self.heavy_blocking_method)
+
+        print "result", result
+
+        self.write("Let's try to not block the ioloop: <a href='/step9'>Step 9</a><br />")
 
         self.write("End request!")
 
         print "End request!"
 
-class Step8Handler(tornado.web.RequestHandler):
-    def sleep(self):
-        pass
-        ## how to do that ?
-        # print "start to sleep"
-        # f = tornado.concurrent.Future()
-        #
-        # time.sleep(5)
-        #
-        # print "start to wake up"
-        # return f
+        self.finish()
 
-    @tornado.gen.coroutine
-    def get(self):
-        print "start yielding"
-        response = yield self.sleep()
-
-        print response
-
-        self.write("End request!")
-
-        print "End request!"
 
 # The ProcessPoolExecutor class is an Executor subclass that uses a pool of processes to execute calls asynchronously.
 # ProcessPoolExecutor uses the multiprocessing module, which allows it to side-step the Global Interpreter Lock
@@ -235,9 +256,8 @@ application = tornado.web.Application([
     (r"/step3", Step3Handler, dict(executor=executor)),
     (r"/step4", Step4Handler, dict(io_loop=io_loop, executor=executor)),
     (r"/step5", Step5Handler),
-    (r"/step6", Step6Handler),
-    (r"/step7", Step7Handler),
-    (r"/step8", Step8Handler),
+    (r"/step6", Step6Handler, dict(io_loop=io_loop)),
+    (r"/step7", Step7Handler, dict(io_loop=io_loop,  executor=executor)),
 ])
 
 if __name__ == "__main__":
